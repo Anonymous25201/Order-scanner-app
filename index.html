@@ -561,9 +561,11 @@
             const sizes = sizeTokens(item.size);
             const qtys = qtyAddends(item.qty);
             const out = [];
+            const groupId = crypto.randomUUID(); // shared by every row split from this one original line
 
             const push = (colour, size, qty) => out.push({
                 id: crypto.randomUUID(),
+                groupId,
                 page: pageLabel,
                 dealer, station,
                 article: item.article || "-",
@@ -860,31 +862,84 @@
             return { value: trimmed, matched: false };
         }
 
-        // Applies master-list auto-correction to one row in place, pushing a
-        // note if the article can't be confidently matched at all.
-        function applyMasterCorrection(row) {
+        // Applies master-list auto-correction across a GROUP of rows that all
+        // came from the same original scanned line (e.g. "BK+PM+BR+SLT+CHPY"
+        // split into 5 rows). This matters because a store-specific shorthand
+        // like "PM" has no letters in common with "Peach" — no dictionary or
+        // fuzzy-distance rule can find that on its own. But once BK->Black,
+        // BR->Brown, and SLT->Sultan are confidently matched, we know the
+        // article's remaining valid colours (from the master list) MUST be
+        // whatever's left over — so "PM" and "CHPY" get resolved by
+        // elimination against the shrinking pool of unclaimed valid colours.
+        function applyMasterCorrectionToRows(rows) {
             if (!masterIndex || masterIndex.size === 0) return;
-            const entry = matchArticleAgainstMaster(row.article);
-            if (!entry) {
-                mismatchNotes.push(`${row.article}: not found in master article list — please verify manually.`);
-                return;
-            }
-            const originalArticle = row.article;
-            row.article = entry.original;
 
-            const colourResult = correctAgainstSet(row.colour, entry.colours, true);
-            if (!colourResult.matched && entry.colours.size > 0) {
-                mismatchNotes.push(`${entry.original}: colour "${row.colour}" not recognized for this article (expected one of: ${[...entry.colours].join(", ")}).`);
-            } else {
-                row.colour = colourResult.value;
-            }
+            const groups = new Map();
+            rows.forEach(r => {
+                const gid = r.groupId || r.id;
+                if (!groups.has(gid)) groups.set(gid, []);
+                groups.get(gid).push(r);
+            });
 
-            const sizeResult = correctAgainstSet(row.size, entry.sizes, false);
-            if (!sizeResult.matched && entry.sizes.size > 0) {
-                mismatchNotes.push(`${entry.original}: size "${row.size}" not recognized for this article (expected one of: ${[...entry.sizes].join(", ")}).`);
-            } else {
-                row.size = sizeResult.value;
-            }
+            groups.forEach(groupRows => {
+                const entry = matchArticleAgainstMaster(groupRows[0].article);
+                if (!entry) {
+                    mismatchNotes.push(`${groupRows[0].article}: not found in master article list — please verify manually.`);
+                    return;
+                }
+                groupRows.forEach(r => { r.article = entry.original; });
+
+                // ---- Colour: confident matches first, then elimination ----
+                if (entry.colours.size > 0) {
+                    const claimed = new Set();
+                    const unresolved = [];
+
+                    groupRows.forEach(r => {
+                        const result = correctAgainstSet(r.colour, entry.colours, true);
+                        if (result.matched && !claimed.has(result.value)) {
+                            r.colour = result.value;
+                            claimed.add(result.value);
+                        } else {
+                            unresolved.push(r);
+                        }
+                    });
+
+                    let remaining = [...entry.colours].filter(c => !claimed.has(c));
+                    unresolved.forEach(r => {
+                        if (remaining.length === 0) {
+                            mismatchNotes.push(`${entry.original}: colour "${r.colour}" not recognized and no valid colours left unclaimed for this line — please check manually.`);
+                            return;
+                        }
+                        const rawFirstLetter = (r.colour || "").trim()[0]?.toUpperCase();
+                        const candidates = remaining.filter(c => c[0]?.toUpperCase() === rawFirstLetter);
+                        let pick = null;
+                        if (candidates.length === 1) {
+                            pick = candidates[0];
+                        } else if (remaining.length === 1) {
+                            pick = remaining[0];
+                        }
+                        if (pick) {
+                            const originalGuess = r.colour;
+                            r.colour = pick;
+                            claimed.add(pick);
+                            remaining = remaining.filter(c => c !== pick);
+                            mismatchNotes.push(`${entry.original}: "${originalGuess}" matched to "${pick}" by elimination (last remaining valid colour for this line) — please double check.`);
+                        } else {
+                            mismatchNotes.push(`${entry.original}: colour "${r.colour}" not recognized — remaining valid options for this article: ${remaining.join(", ")}.`);
+                        }
+                    });
+                }
+
+                // ---- Size: validated per-row as before (usually shared across the group) ----
+                groupRows.forEach(r => {
+                    const sizeResult = correctAgainstSet(r.size, entry.sizes, false);
+                    if (sizeResult.matched) {
+                        r.size = sizeResult.value;
+                    } else if (entry.sizes.size > 0) {
+                        mismatchNotes.push(`${entry.original}: size "${r.size}" not recognized for this article (expected one of: ${[...entry.sizes].join(", ")}).`);
+                    }
+                });
+            });
         }
 
         function rematchAllRows() {
@@ -897,7 +952,7 @@
                 return;
             }
             mismatchNotes = [];
-            masterRows.forEach(row => applyMasterCorrection(row));
+            applyMasterCorrectionToRows(masterRows);
             renderTable(masterRows);
             renderMismatchPanel();
             showToast(`Re-checked ${masterRows.length} rows against the master list.`);
@@ -1017,7 +1072,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
                 try {
                     const rows = await processSinglePage(uploadedFiles[i], i);
                     if (masterIndex && masterIndex.size > 0) {
-                        rows.forEach(row => applyMasterCorrection(row));
+                        applyMasterCorrectionToRows(rows);
                     }
                     masterRows.push(...rows);
                     renderTable(masterRows);
