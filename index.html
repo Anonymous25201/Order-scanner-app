@@ -187,6 +187,7 @@
                     </tfoot>
                 </table>
             </div>
+            <div id="mismatchPanel" class="hidden border-t border-amber-700/40 bg-amber-950/30 text-amber-300 text-xs p-3"></div>
         </div>
 
     </div>
@@ -204,12 +205,14 @@
         let userApiKey = "";
         let uploadedFiles = [];
         let masterRows = [];
+        let mismatchNotes = [];
 
-        // Corrected sequence: Put standard stable models first
+        // Updated July 2026: Gemini 1.0, 1.5, and 2.0 models are all
+        // retired (404 on every call). Current generation is Gemini 3.x.
         const MODEL_SEQUENCE = [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-2.0-flash"
+            "gemini-flash-latest",
+            "gemini-3.5-flash",
+            "gemini-3.1-flash-lite"
         ];
 
         window.onload = function() {
@@ -307,8 +310,10 @@
         function clearAll() {
             uploadedFiles = [];
             masterRows = [];
+            mismatchNotes = [];
             renderThumbnails();
             renderTable(masterRows);
+            renderMismatchPanel();
             updateStats();
             document.getElementById('btnStartScan').disabled = true;
             document.getElementById('imageInput').value = '';
@@ -326,6 +331,18 @@
             document.getElementById('statTotalQty').innerText = `${total.toLocaleString()} Pairs`;
             document.getElementById('footGrandTotal').innerText = total.toLocaleString();
             document.getElementById('visibleBadge').innerText = `${masterRows.length} rows`;
+        }
+
+        function renderMismatchPanel() {
+            const panel = document.getElementById('mismatchPanel');
+            if (mismatchNotes.length === 0) {
+                panel.classList.add('hidden');
+                panel.innerHTML = '';
+                return;
+            }
+            panel.classList.remove('hidden');
+            panel.innerHTML = `<b>${mismatchNotes.length} row(s) couldn't be split automatically — check against the photo:</b><br>` +
+                mismatchNotes.map(n => `&bull; ${n}`).join('<br>');
         }
 
         // AGGRESSIVE COMPRESSION: Resizes images heavily to ensure payload is tiny and won't trigger network timeouts.
@@ -415,6 +432,109 @@
             throw new Error(`All models failed. Last error: ${lastError ? lastError.message : 'Unknown network issue'}`);
         }
 
+        // ---- Colour / size / qty tokenizers, ported from the claude.ai tool ----
+
+        // Colours can be joined by "+", separated by plain spaces, or written
+        // as slash-joined two-tone pairs ("BK/BRN" = one combo colour, not
+        // two). A lone "/" only acts as a SEPARATOR between two colours when
+        // it sits between two chunks that already contain their own slash
+        // (e.g. "BK/Yellow / BK/P.Grn" -> two pairs); otherwise a lone "/"
+        // between two plain words gets re-glued into one two-tone colour.
+        function colourTokens(valRaw) {
+            if (!valRaw) return [];
+            const majorParts = String(valRaw).split(/[+,]+/).map(p => p.trim()).filter(Boolean);
+            const result = [];
+            majorParts.forEach(part => {
+                const rawTokens = part.split(/\s+/).filter(Boolean);
+                let i = 0;
+                while (i < rawTokens.length) {
+                    const tok = rawTokens[i];
+                    if (tok === "/") {
+                        const prev = result[result.length - 1];
+                        const next = rawTokens[i + 1];
+                        if (prev && next && !prev.includes("/") && !next.includes("/")) {
+                            result[result.length - 1] = prev + "/" + next;
+                            i += 2;
+                            continue;
+                        } else {
+                            i += 1;
+                            continue;
+                        }
+                    } else {
+                        const cleaned = tok.replace(/^-+|-+$/g, "").trim();
+                        if (cleaned) result.push(cleaned);
+                        i += 1;
+                    }
+                }
+            });
+            return result.filter(c => c && c !== "/" && c !== "-");
+        }
+
+        // Sizes are sometimes listed together too ("6x9 7x10 8x10") when one
+        // row covers several sizes for a single colour.
+        function sizeTokens(val) {
+            if (!val) return [];
+            return String(val).split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+        }
+
+        // Splits the individual addend numbers out of a qty string like
+        // "2+5+5=12" -> ["2","5","5"], ignoring the "=12" summary. Never
+        // returns just the total — the addends are what let us split rows.
+        function qtyAddends(val) {
+            if (!val) return [];
+            const withoutTotal = String(val).split("=")[0];
+            return withoutTotal.split(/[\s+,]+/).map(s => s.trim()).filter(Boolean);
+        }
+
+        // Splits one extracted item into one-or-more final rows. Patterns:
+        // (A) multiple colours + matching qty count + sizes ALSO match count
+        //     -> zip colour, size, and qty together by position.
+        // (A2) multiple colours + matching qty count, size doesn't also
+        //     match -> zip colour+qty, size stays as originally written.
+        // (B) one colour + multiple sizes + matching qty count -> zip
+        //     size+qty, same colour on every row.
+        // (C) only one qty number overall differs from colour/size count ->
+        //     multiple qty numbers but nothing to pair against (single
+        //     colour, single size) -> still split into separate rows with
+        //     the SAME colour/size repeated, never summed into one total.
+        // Anything else with a genuine count mismatch gets flagged instead
+        // of guessed at.
+        function splitItem(item, pageLabel, dealer, station) {
+            const colours = colourTokens(item.colour);
+            const sizes = sizeTokens(item.size);
+            const qtys = qtyAddends(item.qty);
+            const out = [];
+
+            const push = (colour, size, qty) => out.push({
+                id: crypto.randomUUID(),
+                page: pageLabel,
+                dealer, station,
+                article: item.article || "-",
+                colour: colour || item.colour || "-",
+                size: size || item.size || "-",
+                qty: parseInt(qty, 10) || 0
+            });
+
+            if (colours.length > 1 && colours.length === qtys.length && sizes.length === qtys.length) {
+                colours.forEach((c, idx) => push(c, sizes[idx], qtys[idx]));
+            } else if (colours.length > 1 && colours.length === qtys.length) {
+                colours.forEach((c, idx) => push(c, item.size, qtys[idx]));
+            } else if (colours.length === 1 && sizes.length > 1 && sizes.length === qtys.length) {
+                sizes.forEach((s, idx) => push(item.colour, s, qtys[idx]));
+            } else if (qtys.length > 1 && colours.length > 1) {
+                mismatchNotes.push(`${item.article || "?"}: ${colours.length} colours vs ${qtys.length} qty numbers — kept combined, please check "${item.colour}" / "${item.qty}"`);
+                push(item.colour, item.size, qtys.reduce((s, q) => s + (parseInt(q, 10) || 0), 0));
+            } else if (qtys.length > 1) {
+                // Nothing to pair against (single colour, single size) — still
+                // split into separate rows, e.g. "3+2=5" -> two rows of 3 and 2.
+                qtys.forEach(q => push(item.colour, item.size, q));
+            } else {
+                push(item.colour, item.size, item.qty);
+            }
+
+            return out;
+        }
+
         async function processSinglePage(fileObj, pageIndex) {
             const activeKey = getActiveApiKey();
             if (!activeKey) {
@@ -433,11 +553,11 @@ CRITICAL INSTRUCTIONS:
 3. "station": extracted station or town name (or "")
 4. "items": array of item rows written on the sheet. Each item must contain:
    - "article": article / model number. Be EXTREMELY careful with numbers. Double check 9s and 3s (e.g. 6999-04, not 6939-04).
-   - "colour": list of colors (e.g., "Bk + Br + Tan" or "Bk/Red")
-   - "size": size string (e.g. "6x10", "8x10=3, 11x1=3", "5x8")
-   - "qty": raw quantity or formula (e.g., "5", "5+5+5", "3+3")
+   - "colour": list of colors exactly as written, keep "+" or spaces between multiple colours on one line (e.g., "BK+BR+TAN" or "BK BRN TAN" or "BK/Red")
+   - "size": size string exactly as written, keep multiple sizes space-separated if the line lists more than one (e.g. "6x10" or "6x9 7x10 8x10")
+   - "qty": the FULL quantity exactly as written INCLUDING every "+" sign and the "=" total if present (e.g. "5", "5+5+5=15", "3+3"). NEVER collapse this down to just the final total — the individual numbers are needed to split the row by colour or size. This is the single most important field to get exactly right.
 
-DITTO MARKS (",", ",,", "-do-", "-||-", "”", "11", "/ /", "Do"): 
+DITTO MARKS (",", ",,", "-do-", "-||-", """, "11", "/ /", "Do"): 
 If you see ANY ditto mark or quotation mark signifying "same as above" in ANY column (Article, Colour, or Size), you MUST copy the exact value from the row immediately above it. Do NOT output the ditto mark itself.`;
 
             const payload = {
@@ -480,57 +600,18 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
             if (!contentText) return [];
 
             const parsed = JSON.parse(contentText);
-            const extracted = [];
             const effectiveDealer = parsed.dealerName && parsed.dealerName !== "Unknown Dealer" ? parsed.dealerName : (topDealer || "VENUS ENTERPRISES");
+            const pageLabel = parsed.pageNo || `Page ${pageIndex + 1}`;
+            const station = parsed.station || "-";
 
             if (pageIndex === 0 && parsed.dealerName && parsed.dealerName !== "Unknown Dealer") {
                 document.getElementById('topDealerInput').value = effectiveDealer;
                 document.getElementById('kpiDealerName').innerText = effectiveDealer;
             }
 
+            const extracted = [];
             (parsed.items || []).forEach(item => {
-                let qtyStr = (item.qty || "0").toString().replace(/=/g, '').trim();
-                let quants = qtyStr.split('+').map(q => q.trim()).filter(q => q && !isNaN(q));
-                let colors = (item.colour || "-").split('+').map(c => c.trim());
-
-                if (quants.length > 1 && colors.length > 1 && quants.length === colors.length) {
-                    quants.forEach((q, idx) => {
-                        extracted.push({
-                            id: crypto.randomUUID(),
-                            page: parsed.pageNo || `Page ${pageIndex + 1}`,
-                            dealer: effectiveDealer,
-                            station: parsed.station || "-",
-                            article: item.article || "-",
-                            colour: colors[idx] || item.colour,
-                            size: item.size || "-",
-                            qty: parseInt(q, 10) || 0
-                        });
-                    });
-                } else if (quants.length > 1) {
-                    quants.forEach(q => {
-                        extracted.push({
-                            id: crypto.randomUUID(),
-                            page: parsed.pageNo || `Page ${pageIndex + 1}`,
-                            dealer: effectiveDealer,
-                            station: parsed.station || "-",
-                            article: item.article || "-",
-                            colour: item.colour || "-",
-                            size: item.size || "-",
-                            qty: parseInt(q, 10) || 0
-                        });
-                    });
-                } else {
-                    extracted.push({
-                        id: crypto.randomUUID(),
-                        page: parsed.pageNo || `Page ${pageIndex + 1}`,
-                        dealer: effectiveDealer,
-                        station: parsed.station || "-",
-                        article: item.article || "-",
-                        colour: item.colour || "-",
-                        size: item.size || "-",
-                        qty: parseInt(qtyStr, 10) || 0
-                    });
-                }
+                extracted.push(...splitItem(item, pageLabel, effectiveDealer, station));
             });
 
             return extracted;
@@ -557,7 +638,9 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
             progress.innerHTML = `<span class='text-amber-400'>Initializing scan sequence...</span>`;
 
             masterRows = [];
+            mismatchNotes = [];
             renderTable([]);
+            renderMismatchPanel();
 
             let successPages = 0;
 
@@ -567,6 +650,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
                     const rows = await processSinglePage(uploadedFiles[i], i);
                     masterRows.push(...rows);
                     renderTable(masterRows);
+                    renderMismatchPanel();
                     updateStats();
                     successPages++;
                     progress.innerHTML = `<span class='text-emerald-400'>Page ${i + 1} completed successfully.</span>`;
