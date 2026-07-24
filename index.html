@@ -737,6 +737,14 @@
 
         // Looks up the closest matching article in the master list. Returns
         // null if nothing is close enough to trust.
+        //
+        // SAFETY RULE: fuzzy (edit-distance) matching is only applied to
+        // codes that contain letters — that's the domain-appropriate case
+        // for handwriting misreads (I/J, O/E, etc). A PURELY NUMERIC code
+        // requires an exact match. Fuzzy-matching numeric codes is
+        // dangerous: "3362" sitting 1 digit away from "33602" isn't a typo,
+        // it's very likely two different real products, and silently
+        // reassigning one to the other risks shipping the wrong item.
         function matchArticleAgainstMaster(scannedArticle) {
             if (!masterIndex || masterIndex.size === 0) return null;
             const key = normalizeCode(scannedArticle);
@@ -745,7 +753,10 @@
             // Exact match first
             if (masterIndex.has(key)) return masterIndex.get(key);
 
-            // Fuzzy match: find the closest key within the allowed distance
+            const isPurelyNumeric = /^[0-9]+$/.test(key);
+            if (isPurelyNumeric) return null; // no exact match = not found, full stop
+
+            // Fuzzy match (letters present): find the closest key within the allowed distance
             let best = null;
             let bestDist = Infinity;
             for (const [candKey, entry] of masterIndex.entries()) {
@@ -849,8 +860,16 @@
             }
 
             // 4. Fuzzy match on the (possibly expanded) whole value — catches
-            // typos in full spellings too, e.g. "Broen" -> "Brown"
-            const compareValue = isColourField ? expandColourValue(trimmed) : trimmed;
+            // typos in full spellings too, e.g. "Broen" -> "Brown".
+            // SIZE FIELDS ARE EXCLUDED from this step: size codes are short
+            // measurement strings (6x8, 7x8, 4x8...) where a 1-character
+            // difference is a genuinely different size, not a typo. Fuzzy-
+            // matching sizes would silently "correct" an invalid size into
+            // some other valid-but-wrong size instead of flagging it.
+            if (!isColourField) {
+                return { value: trimmed, matched: false };
+            }
+            const compareValue = expandColourValue(trimmed);
             let best = null, bestDist = Infinity;
             for (const valid of validSet) {
                 const dist = levenshtein(compareValue.toUpperCase(), valid.toUpperCase());
@@ -879,12 +898,18 @@
                 const gid = r.groupId || r.id;
                 if (!groups.has(gid)) groups.set(gid, []);
                 groups.get(gid).push(r);
+                r.flagged = false; // reset each time correction runs
             });
+
+            const flag = (r, note) => {
+                r.flagged = true;
+                mismatchNotes.push(note);
+            };
 
             groups.forEach(groupRows => {
                 const entry = matchArticleAgainstMaster(groupRows[0].article);
                 if (!entry) {
-                    mismatchNotes.push(`${groupRows[0].article}: not found in master article list — please verify manually.`);
+                    groupRows.forEach(r => flag(r, `${r.article}: not found in master article list — please verify manually.`));
                     return;
                 }
                 groupRows.forEach(r => { r.article = entry.original; });
@@ -907,7 +932,8 @@
                     let remaining = [...entry.colours].filter(c => !claimed.has(c));
                     unresolved.forEach(r => {
                         if (remaining.length === 0) {
-                            mismatchNotes.push(`${entry.original}: colour "${r.colour}" not recognized and no valid colours left unclaimed for this line — please check manually.`);
+                            flag(r, `${entry.original}: colour "${r.colour}" not recognized and no valid colours left unclaimed for this line — please check manually.`);
+                            r.colour = `${r.colour} (?)`;
                             return;
                         }
                         const rawFirstLetter = (r.colour || "").trim()[0]?.toUpperCase();
@@ -923,22 +949,32 @@
                             r.colour = pick;
                             claimed.add(pick);
                             remaining = remaining.filter(c => c !== pick);
-                            mismatchNotes.push(`${entry.original}: "${originalGuess}" matched to "${pick}" by elimination (last remaining valid colour for this line) — please double check.`);
+                            flag(r, `${entry.original}: "${originalGuess}" matched to "${pick}" by elimination (last remaining valid colour for this line) — please double check.`);
                         } else {
-                            mismatchNotes.push(`${entry.original}: colour "${r.colour}" not recognized — remaining valid options for this article: ${remaining.join(", ")}.`);
+                            flag(r, `${entry.original}: colour "${r.colour}" not recognized — remaining valid options for this article: ${remaining.join(", ")}.`);
+                            r.colour = `${r.colour} (?)`;
                         }
                     });
+                } else {
+                    // Article matched, but the catalog has no colour data at all
+                    // for it — nothing to check against, so say so instead of
+                    // silently leaving it unvalidated.
+                    groupRows.forEach(r => flag(r, `${entry.original}: no colour data in catalog for this article — colour "${r.colour}" kept as scanned, please verify manually.`));
                 }
 
                 // ---- Size: validated per-row as before (usually shared across the group) ----
-                groupRows.forEach(r => {
-                    const sizeResult = correctAgainstSet(r.size, entry.sizes, false);
-                    if (sizeResult.matched) {
-                        r.size = sizeResult.value;
-                    } else if (entry.sizes.size > 0) {
-                        mismatchNotes.push(`${entry.original}: size "${r.size}" not recognized for this article (expected one of: ${[...entry.sizes].join(", ")}).`);
-                    }
-                });
+                if (entry.sizes.size > 0) {
+                    groupRows.forEach(r => {
+                        const sizeResult = correctAgainstSet(r.size, entry.sizes, false);
+                        if (sizeResult.matched) {
+                            r.size = sizeResult.value;
+                        } else {
+                            flag(r, `${entry.original}: size "${r.size}" not recognized for this article (expected one of: ${[...entry.sizes].join(", ")}).`);
+                        }
+                    });
+                } else {
+                    groupRows.forEach(r => flag(r, `${entry.original}: no size data in catalog for this article — size "${r.size}" kept as scanned, please verify manually.`));
+                }
             });
         }
 
@@ -1120,9 +1156,12 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
 
             rows.forEach((row) => {
                 const tr = document.createElement('tr');
-                tr.className = "hover:bg-slate-700/40 transition";
+                tr.className = row.flagged
+                    ? "hover:bg-amber-900/30 transition bg-amber-950/40 border-l-2 border-amber-500"
+                    : "hover:bg-slate-700/40 transition";
+                const flagIcon = row.flagged ? `<i class="fa-solid fa-triangle-exclamation text-amber-400 mr-1" title="Flagged — check against master list"></i>` : "";
                 tr.innerHTML = `
-                    <td class="py-2.5 px-4 font-semibold text-indigo-400">${row.page}</td>
+                    <td class="py-2.5 px-4 font-semibold text-indigo-400">${flagIcon}${row.page}</td>
                     <td class="py-2 px-3"><input type="text" value="${row.dealer}" onchange="updateCell('${row.id}', 'dealer', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-slate-100 font-bold w-full focus:outline-none"></td>
                     <td class="py-2 px-3"><input type="text" value="${row.station}" onchange="updateCell('${row.id}', 'station', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-slate-400 w-full focus:outline-none"></td>
                     <td class="py-2 px-3"><input type="text" value="${row.article}" onchange="updateCell('${row.id}', 'article', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-white font-bold w-full focus:outline-none"></td>
