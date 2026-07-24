@@ -205,13 +205,11 @@
         let uploadedFiles = [];
         let masterRows = [];
 
-        // Updated July 2026: Gemini 1.0, 1.5, and 2.0 models are all
-        // retired (404). Current generation is Gemini 3.x. Try the fast
-        // GA model first, then fall back to the lite GA model.
+        // Corrected sequence: Put standard stable models first
         const MODEL_SEQUENCE = [
-            "gemini-flash-latest",
-            "gemini-3.5-flash",
-            "gemini-3.1-flash-lite"
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-2.0-flash"
         ];
 
         window.onload = function() {
@@ -427,15 +425,20 @@
             const topDealer = document.getElementById('topDealerInput').value.trim();
 
             const prompt = `You are an expert handwriting OCR engine for footwear order pads.
-Analyze this order form page and return a JSON object with:
+Analyze this order form page line-by-line and return a JSON object.
+
+CRITICAL INSTRUCTIONS:
 1. "pageNo": "Page ${pageIndex + 1}"
 2. "dealerName": extracted dealer name written at the top header of the pad. (If blank/unclear, use "${topDealer || 'VENUS ENTERPRISES'}")
 3. "station": extracted station or town name (or "")
 4. "items": array of item rows written on the sheet. Each item must contain:
-   - "article": article / model number
+   - "article": article / model number. Be EXTREMELY careful with numbers. Double check 9s and 3s (e.g. 6999-04, not 6939-04).
    - "colour": list of colors (e.g., "Bk + Br + Tan" or "Bk/Red")
    - "size": size string (e.g. "6x10", "8x10=3, 11x1=3", "5x8")
-   - "qty": raw quantity or formula (e.g., "5", "5+5+5", "3+3")`;
+   - "qty": raw quantity or formula (e.g., "5", "5+5+5", "3+3")
+
+DITTO MARKS (",", ",,", "-do-", "-||-", "”", "11", "/ /", "Do"): 
+If you see ANY ditto mark or quotation mark signifying "same as above" in ANY column (Article, Colour, or Size), you MUST copy the exact value from the row immediately above it. Do NOT output the ditto mark itself.`;
 
             const payload = {
                 contents: [{
