@@ -89,6 +89,38 @@
             </div>
         </div>
 
+        <!-- Master Article List Upload -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 space-y-3">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
+                <div>
+                    <h2 class="text-base font-bold text-white flex items-center gap-2">
+                        <i class="fa-solid fa-list-check text-emerald-400"></i> Master Article List (Auto-Correct Reference)
+                    </h2>
+                    <p class="text-xs text-slate-400 mt-1 max-w-2xl">
+                        Upload your real product catalog once — a CSV or Excel file with columns
+                        <b class="text-slate-300">Article No.</b>, <b class="text-slate-300">Colour</b>, <b class="text-slate-300">Size</b>
+                        (one row per valid combination). Every scan will then be checked against
+                        this list and auto-corrected — misread article numbers get matched to the
+                        closest real one, and colours/sizes get validated against what that
+                        article actually comes in.
+                    </p>
+                </div>
+                <div class="flex flex-col gap-2 items-stretch w-full md:w-auto">
+                    <label for="masterListInput" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-4 py-2.5 rounded-xl shadow transition active:scale-95 text-xs flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap">
+                        <i class="fa-solid fa-file-arrow-up"></i>
+                        <span>Upload Article List (.csv / .xlsx)</span>
+                    </label>
+                    <input type="file" id="masterListInput" accept=".csv,.xlsx,.xls" class="hidden" onchange="handleMasterListUpload(event)">
+                    <button onclick="rematchAllRows()" class="bg-slate-700 hover:bg-slate-600 text-slate-200 font-medium px-4 py-2 rounded-xl shadow transition text-xs flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-rotate"></i> Re-check All Rows Against List
+                    </button>
+                </div>
+            </div>
+            <div id="masterListStatus" class="text-xs text-slate-400 bg-slate-900/60 rounded-lg px-3 py-2 border border-slate-700">
+                No article list loaded yet — scans will rely on handwriting reading alone.
+            </div>
+        </div>
+
         <!-- Upload & Settings Section -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
@@ -230,6 +262,7 @@
         let uploadedFiles = [];
         let masterRows = [];
         let mismatchNotes = [];
+        let masterIndex = null; // Map: normalizedArticle -> { original, colours: Set, sizes: Set }
 
         // Updated July 2026: Gemini 1.0, 1.5, and 2.0 models are all
         // retired (404 on every call). Current generation is Gemini 3.x.
@@ -559,6 +592,317 @@
             return out;
         }
 
+        // ---- Master Article List: upload, indexing, and auto-correction ----
+
+        // Standard Levenshtein edit distance — counts how many single-character
+        // insertions/deletions/substitutions turn one string into the other.
+        // Used to catch handwriting misreads like "IG-1005" vs "JG-1005"
+        // (distance 1) or "6999-04" vs "6939-04" (distance 1).
+        function levenshtein(a, b) {
+            const m = a.length, n = b.length;
+            if (m === 0) return n;
+            if (n === 0) return m;
+            const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+            for (let i = 0; i <= m; i++) dp[i][0] = i;
+            for (let j = 0; j <= n; j++) dp[0][j] = j;
+            for (let i = 1; i <= m; i++) {
+                for (let j = 1; j <= n; j++) {
+                    const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+                    dp[i][j] = Math.min(
+                        dp[i - 1][j] + 1,
+                        dp[i][j - 1] + 1,
+                        dp[i - 1][j - 1] + cost
+                    );
+                }
+            }
+            return dp[m][n];
+        }
+
+        // Strips everything except letters/digits and uppercases, so "JG-1005",
+        // "jg 1005", and "JG_1005" all compare as the same underlying code.
+        function normalizeCode(s) {
+            return String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+        }
+
+        // How many edits we'll tolerate before refusing to call it a match —
+        // scales with length so short codes aren't matched too loosely.
+        function maxAllowedDistance(len) {
+            if (len <= 4) return 1;
+            if (len <= 8) return 2;
+            return Math.max(2, Math.floor(len * 0.2));
+        }
+
+        function parseMasterListFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const wb = XLSX.read(data, { type: "array" });
+                        const sheet = wb.Sheets[wb.SheetNames[0]];
+                        // Raw array-of-arrays, not object-mode — needed because
+                        // this kind of catalog often has ONE header cell
+                        // ("COLOUR") followed by several blank-header columns
+                        // that all belong to it (wide format).
+                        const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", raw: true });
+                        resolve(aoa);
+                    } catch (err) {
+                        reject(err);
+                    }
+                };
+                reader.onerror = () => reject(new Error("Could not read the file."));
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        // Finds the column index of the first header cell that matches one
+        // of the candidate labels (case-insensitive, punctuation-insensitive).
+        function findHeaderColIndex(headerRow, candidates) {
+            for (let i = 0; i < headerRow.length; i++) {
+                const cell = String(headerRow[i] || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+                if (candidates.includes(cell)) return i;
+            }
+            return -1;
+        }
+
+        async function handleMasterListUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const statusEl = document.getElementById('masterListStatus');
+            statusEl.innerText = "Reading article list...";
+
+            try {
+                const aoa = await parseMasterListFile(file);
+                if (!aoa.length) throw new Error("File appears to be empty.");
+
+                const headerRow = aoa[0];
+                const articleIdx = findHeaderColIndex(headerRow, ["articleno", "article", "articlenumber", "model", "modelno"]);
+                const colourIdx = findHeaderColIndex(headerRow, ["colour", "color", "colours", "colors"]);
+                const sizeIdx = findHeaderColIndex(headerRow, ["size", "sizes"]);
+
+                if (articleIdx === -1) {
+                    throw new Error(`Couldn't find an Article No. column. Found headers: ${headerRow.filter(Boolean).join(", ")}`);
+                }
+
+                // Figure out the column ranges each label actually covers.
+                // If there's a gap of more than 1 column between the COLOUR
+                // header and the next label (SIZE, or end of sheet), this is
+                // a "wide" catalog — several colour slots for one article on
+                // one row — so we sweep that whole range. Otherwise it's a
+                // simple one-value-per-row layout.
+                const totalCols = Math.max(...aoa.map(r => r.length));
+                const colourEndIdx = (sizeIdx !== -1 && sizeIdx > colourIdx) ? sizeIdx - 1 : (colourIdx !== -1 ? colourIdx : -1);
+                const sizeEndIdx = sizeIdx !== -1 ? totalCols - 1 : -1;
+
+                const index = new Map();
+                for (let r = 1; r < aoa.length; r++) {
+                    const row = aoa[r];
+                    const rawArticle = String(row[articleIdx] ?? "").trim();
+                    if (!rawArticle) continue;
+                    const key = normalizeCode(rawArticle);
+                    if (!index.has(key)) {
+                        index.set(key, { original: rawArticle, colours: new Set(), sizes: new Set() });
+                    }
+                    const entry = index.get(key);
+
+                    if (colourIdx !== -1) {
+                        for (let c = colourIdx; c <= colourEndIdx; c++) {
+                            const val = String(row[c] ?? "").trim();
+                            if (val) entry.colours.add(val);
+                        }
+                    }
+                    if (sizeIdx !== -1) {
+                        for (let c = sizeIdx; c <= sizeEndIdx; c++) {
+                            const val = String(row[c] ?? "").trim();
+                            if (val) entry.sizes.add(val);
+                        }
+                    }
+                }
+
+                masterIndex = index;
+                statusEl.innerHTML = `<i class="fa-solid fa-circle-check text-emerald-400"></i> Loaded <b>${index.size}</b> articles from "${file.name}". New scans will now auto-correct against this list.`;
+                showToast(`Article list loaded: ${index.size} articles.`);
+
+                if (masterRows.length > 0) {
+                    rematchAllRows();
+                }
+            } catch (err) {
+                statusEl.innerHTML = `<span class="text-red-400"><i class="fa-solid fa-circle-exclamation"></i> Error reading file: ${err.message}</span>`;
+                showToast("Couldn't read that article list file.");
+            }
+        }
+
+        // Looks up the closest matching article in the master list. Returns
+        // null if nothing is close enough to trust.
+        function matchArticleAgainstMaster(scannedArticle) {
+            if (!masterIndex || masterIndex.size === 0) return null;
+            const key = normalizeCode(scannedArticle);
+            if (!key) return null;
+
+            // Exact match first
+            if (masterIndex.has(key)) return masterIndex.get(key);
+
+            // Fuzzy match: find the closest key within the allowed distance
+            let best = null;
+            let bestDist = Infinity;
+            for (const [candKey, entry] of masterIndex.entries()) {
+                const dist = levenshtein(key, candKey);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    best = entry;
+                }
+            }
+            if (best && bestDist <= maxAllowedDistance(key.length)) {
+                return best;
+            }
+            return null;
+        }
+
+        // Confirmed colour short-forms (built from real corrections made on
+        // these dealers' order forms). Keys are checked case-insensitively.
+        const COLOR_ABBREV = {
+            "BK": "BLACK", "DK": "BLACK",
+            "BRN": "BROWN", "DRN": "BROWN",
+            "TAN": "TAN",
+            "BG": "BEIGE", "DG": "BEIGE",
+            "WT": "WHITE", "WHT": "WHITE",
+            "RD": "RED", "RED": "RED",
+            "GRY": "GREY", "GREY": "GREY",
+            "D.GRY": "DARK GREY", "L.GRY": "LIGHT GREY", "S.GRY": "STEEL GREY",
+            "STL": "STEEL", "STL-GRY": "STEEL GREY",
+            "N.BL": "NAVY BLUE", "N.B": "NAVY BLUE", "BL": "BLUE",
+            "PCH": "PEACH",
+            "CHR": "CHERRY",
+            "MHD": "MEHANDI", "MYD": "MEHANDI",
+            "PINK": "PINK", "PURPLE": "PURPLE",
+            "GRN": "GREEN", "P.GRN": "PISTA GREEN", "PISTA": "PISTA GREEN",
+            "OLV": "OLIVE", "OLIVE": "OLIVE",
+            "CRM": "CREAM", "CREAM": "CREAM",
+            "ONION": "ONION", "MIX": "MIX"
+        };
+
+        // Expands one colour token through the abbreviation dictionary if
+        // known; otherwise returns it unchanged (so full spellings pass
+        // straight through untouched).
+        function expandOneColourWord(token) {
+            const key = token.trim().toUpperCase();
+            return COLOR_ABBREV[key] || token.trim();
+        }
+
+        // Expands a full colour value, including "/"-joined combos, e.g.
+        // "BK/RD" -> "BLACK/RED", "BRN" -> "BROWN", "Mint" -> "Mint" (unknown,
+        // left as-is).
+        function expandColourValue(value) {
+            return String(value || "")
+                .split("/")
+                .map(part => expandOneColourWord(part))
+                .join("/");
+        }
+
+        // Checks a single colour/size value against the set of values known
+        // to be valid for a matched article. Tries, in order: exact match,
+        // abbreviation-expanded match (BK -> Black), per-part combo match
+        // (BK/RD -> Black/Red, matched against individual valid entries even
+        // if the master list doesn't store that exact combo string), then
+        // fuzzy-typo match as a last resort.
+        function correctAgainstSet(value, validSet, isColourField) {
+            if (!validSet || validSet.size === 0) return { value, matched: false };
+            const trimmed = String(value || "").trim();
+            if (!trimmed) return { value, matched: false };
+
+            // 1. Exact match (case-insensitive)
+            for (const valid of validSet) {
+                if (valid.toLowerCase() === trimmed.toLowerCase()) return { value: valid, matched: true };
+            }
+
+            if (isColourField) {
+                // 2. Abbreviation-expanded exact match ("BK" -> "BLACK")
+                const expanded = expandColourValue(trimmed);
+                for (const valid of validSet) {
+                    if (valid.toLowerCase() === expanded.toLowerCase()) return { value: valid, matched: true };
+                }
+
+                // 3. Combo colours: match each "/"-separated part independently
+                // against the valid set, even if the combo itself isn't stored
+                // as one exact string in the master list.
+                if (trimmed.includes("/") || expanded.includes("/")) {
+                    const parts = expanded.split("/").map(p => p.trim());
+                    const resolvedParts = parts.map(part => {
+                        for (const valid of validSet) {
+                            if (valid.toLowerCase() === part.toLowerCase()) return valid;
+                        }
+                        // fuzzy-match this individual part too
+                        let best = null, bestDist = Infinity;
+                        for (const valid of validSet) {
+                            const dist = levenshtein(part.toUpperCase(), valid.toUpperCase());
+                            if (dist < bestDist) { bestDist = dist; best = valid; }
+                        }
+                        return (best && bestDist <= maxAllowedDistance(part.length)) ? best : null;
+                    });
+                    if (resolvedParts.every(p => p !== null)) {
+                        return { value: resolvedParts.join("/"), matched: true };
+                    }
+                }
+            }
+
+            // 4. Fuzzy match on the (possibly expanded) whole value — catches
+            // typos in full spellings too, e.g. "Broen" -> "Brown"
+            const compareValue = isColourField ? expandColourValue(trimmed) : trimmed;
+            let best = null, bestDist = Infinity;
+            for (const valid of validSet) {
+                const dist = levenshtein(compareValue.toUpperCase(), valid.toUpperCase());
+                if (dist < bestDist) { bestDist = dist; best = valid; }
+            }
+            if (best && bestDist <= maxAllowedDistance(compareValue.length)) {
+                return { value: best, matched: true };
+            }
+            return { value: trimmed, matched: false };
+        }
+
+        // Applies master-list auto-correction to one row in place, pushing a
+        // note if the article can't be confidently matched at all.
+        function applyMasterCorrection(row) {
+            if (!masterIndex || masterIndex.size === 0) return;
+            const entry = matchArticleAgainstMaster(row.article);
+            if (!entry) {
+                mismatchNotes.push(`${row.article}: not found in master article list — please verify manually.`);
+                return;
+            }
+            const originalArticle = row.article;
+            row.article = entry.original;
+
+            const colourResult = correctAgainstSet(row.colour, entry.colours, true);
+            if (!colourResult.matched && entry.colours.size > 0) {
+                mismatchNotes.push(`${entry.original}: colour "${row.colour}" not recognized for this article (expected one of: ${[...entry.colours].join(", ")}).`);
+            } else {
+                row.colour = colourResult.value;
+            }
+
+            const sizeResult = correctAgainstSet(row.size, entry.sizes, false);
+            if (!sizeResult.matched && entry.sizes.size > 0) {
+                mismatchNotes.push(`${entry.original}: size "${row.size}" not recognized for this article (expected one of: ${[...entry.sizes].join(", ")}).`);
+            } else {
+                row.size = sizeResult.value;
+            }
+        }
+
+        function rematchAllRows() {
+            if (!masterIndex || masterIndex.size === 0) {
+                showToast("Upload an article list first.");
+                return;
+            }
+            if (masterRows.length === 0) {
+                showToast("No scanned rows to check yet.");
+                return;
+            }
+            mismatchNotes = [];
+            masterRows.forEach(row => applyMasterCorrection(row));
+            renderTable(masterRows);
+            renderMismatchPanel();
+            showToast(`Re-checked ${masterRows.length} rows against the master list.`);
+        }
+
         async function processSinglePage(fileObj, pageIndex) {
             const activeKey = getActiveApiKey();
             if (!activeKey) {
@@ -672,6 +1016,9 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
                 progress.innerHTML = `<span class='text-sky-400'>Scanning page ${i + 1} of ${uploadedFiles.length}... (Compressing image)</span>`;
                 try {
                     const rows = await processSinglePage(uploadedFiles[i], i);
+                    if (masterIndex && masterIndex.size > 0) {
+                        rows.forEach(row => applyMasterCorrection(row));
+                    }
                     masterRows.push(...rows);
                     renderTable(masterRows);
                     renderMismatchPanel();
