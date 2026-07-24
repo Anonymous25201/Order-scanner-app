@@ -772,27 +772,72 @@
             return null;
         }
 
-        // Confirmed colour short-forms (built from real corrections made on
-        // these dealers' order forms). Keys are checked case-insensitively.
+        // Colour short-forms — a mix of ones confirmed on real order forms
+        // (BK, BRN, MHD, DK, DRN...) and general footwear/fashion industry
+        // shorthand conventions applied by the same logic (first letters,
+        // dropped vowels, common trade abbreviations), so the dictionary
+        // covers shorthand beyond only what's been manually corrected so far.
+        // Keys are checked case-insensitively.
         const COLOR_ABBREV = {
-            "BK": "BLACK", "DK": "BLACK",
-            "BRN": "BROWN", "DRN": "BROWN",
+            // Black
+            "BK": "BLACK", "DK": "BLACK", "BLK": "BLACK",
+            // Brown
+            "BR": "BROWN", "BRN": "BROWN", "DRN": "BROWN", "BRW": "BROWN",
+            // Tan / Beige
             "TAN": "TAN",
-            "BG": "BEIGE", "DG": "BEIGE",
-            "WT": "WHITE", "WHT": "WHITE",
+            "BG": "BEIGE", "DG": "BEIGE", "BEG": "BEIGE",
+            // White
+            "WT": "WHITE", "WHT": "WHITE", "WHI": "WHITE",
+            // Red
             "RD": "RED", "RED": "RED",
-            "GRY": "GREY", "GREY": "GREY",
-            "D.GRY": "DARK GREY", "L.GRY": "LIGHT GREY", "S.GRY": "STEEL GREY",
+            // Grey
+            "GRY": "GREY", "GREY": "GREY", "GRE": "GREY", "GRAY": "GREY",
+            "D.GRY": "DARK GREY", "DGRY": "DARK GREY",
+            "L.GRY": "LIGHT GREY", "LGRY": "LIGHT GREY",
+            "S.GRY": "STEEL GREY",
             "STL": "STEEL", "STL-GRY": "STEEL GREY",
-            "N.BL": "NAVY BLUE", "N.B": "NAVY BLUE", "BL": "BLUE",
+            // Blue
+            "BL": "BLUE", "BLU": "BLUE", "BLUE": "BLUE",
+            "N.BL": "NAVY BLUE", "N.B": "NAVY BLUE", "NVY": "NAVY BLUE", "NAVY": "NAVY BLUE",
+            "SKY": "SKY BLUE", "S.BL": "SKY BLUE",
+            "TRQ": "TURQUOISE",
+            // Peach / Pink / Purple / Magenta
             "PCH": "PEACH",
-            "CHR": "CHERRY",
-            "MHD": "MEHANDI", "MYD": "MEHANDI",
-            "PINK": "PINK", "PURPLE": "PURPLE",
-            "GRN": "GREEN", "P.GRN": "PISTA GREEN", "PISTA": "PISTA GREEN",
+            "PNK": "PINK", "PINK": "PINK",
+            "PUR": "PURPLE", "PRPL": "PURPLE", "PURPLE": "PURPLE",
+            "MGN": "MAGENTA", "MAGENTA": "MAGENTA",
+            "LAV": "LAVENDER",
+            // Cherry / Maroon / Wine / Rust
+            "CHR": "CHERRY", "CHRY": "CHERRY", "CHRP": "CHERRY",
+            "MRN": "MAROON", "MAROON": "MAROON",
+            "WNE": "WINE", "WINE": "WINE",
+            "RST": "RUST", "RUST": "RUST",
+            "CRL": "CORAL", "CORAL": "CORAL",
+            // Green
+            "GRN": "GREEN", "GRE": "GREEN", "GREEN": "GREEN",
+            "P.GRN": "PISTA GREEN", "PISTA": "PISTA GREEN",
             "OLV": "OLIVE", "OLIVE": "OLIVE",
+            "MNT": "MINT", "MINT": "MINT",
+            // Yellow / Orange / Gold / Mustard
+            "YLW": "YELLOW", "YEL": "YELLOW", "YELLOW": "YELLOW",
+            "OR": "ORANGE", "ORG": "ORANGE", "ORANGE": "ORANGE",
+            "GLD": "GOLD", "GOLD": "GOLD", "R.GOLD": "ROSE GOLD", "RGD": "ROSE GOLD",
+            "MST": "MUSTARD", "MUSTARD": "MUSTARD",
+            // Silver / Bronze / Copper / Metallics
+            "SLV": "SILVER", "SILVER": "SILVER",
+            "BRZ": "BRONZE", "BRONZE": "BRONZE",
+            "CPR": "COPPER", "COPR": "COPPER", "COPPER": "COPPER",
+            // Cream / Khaki / Indigo / Grape / Blush / Fig
             "CRM": "CREAM", "CREAM": "CREAM",
-            "ONION": "ONION", "MIX": "MIX"
+            "KHK": "KHAKI", "KHAKI": "KHAKI",
+            "IND": "INDIGO", "INDIGO": "INDIGO",
+            "GRP": "GRAPE", "GRAPE": "GRAPE",
+            "BLS": "BLUSH", "BLUSH": "BLUSH",
+            "FIG": "FIG",
+            // Mehandi (henna-green shade, common in this trade)
+            "MHD": "MEHANDI", "MYD": "MEHANDI", "MEHANDI": "MEHANDI",
+            // Onion / Mix (special buckets used by these dealers)
+            "ONION": "ONION", "MIX": "MIX", "MIXED": "MIX", "ASSORTED": "MIX"
         };
 
         // Expands one colour token through the abbreviation dictionary if
@@ -811,6 +856,28 @@
                 .split("/")
                 .map(part => expandOneColourWord(part))
                 .join("/");
+        }
+
+        // Title-cases a word ("BLACK" -> "Black") for a friendlier display —
+        // used only when a value isn't going to be overwritten by an exact
+        // master-catalog spelling, so the catalog's own casing always wins
+        // when one is available.
+        function titleCase(value) {
+            return String(value || "").split(/([\s/])/).map(part =>
+                /[\s/]/.test(part) ? part : (part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+            ).join("");
+        }
+
+        // Baseline colour expansion that runs on EVERY row, independent of
+        // whether a master article list is loaded at all. This guarantees
+        // short forms like "BK" always become "Black" even before/without
+        // catalog matching — catalog matching (when available) then refines
+        // this further, and its exact spelling/casing takes precedence.
+        function globalExpandColours(rows) {
+            rows.forEach(r => {
+                const expanded = expandColourValue(r.colour);
+                r.colour = titleCase(expanded);
+            });
         }
 
         // Checks a single colour/size value against the set of values known
@@ -988,6 +1055,7 @@
                 return;
             }
             mismatchNotes = [];
+            globalExpandColours(masterRows);
             applyMasterCorrectionToRows(masterRows);
             renderTable(masterRows);
             renderMismatchPanel();
@@ -1107,8 +1175,9 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
                 progress.innerHTML = `<span class='text-sky-400'>Scanning page ${i + 1} of ${uploadedFiles.length}... (Compressing image)</span>`;
                 try {
                     const rows = await processSinglePage(uploadedFiles[i], i);
+                    globalExpandColours(rows); // always spell out short forms, even with no catalog loaded
                     if (masterIndex && masterIndex.size > 0) {
-                        applyMasterCorrectionToRows(rows);
+                        applyMasterCorrectionToRows(rows); // catalog match refines/validates on top
                     }
                     masterRows.push(...rows);
                     renderTable(masterRows);
