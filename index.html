@@ -156,6 +156,30 @@
                 </div>
             </div>
 
+            <!-- Find & Replace Bar -->
+            <div class="p-3 bg-slate-900/60 border-b border-slate-700 flex flex-col md:flex-row gap-2 items-stretch md:items-center text-xs">
+                <div class="flex items-center gap-1.5 text-slate-400 font-semibold whitespace-nowrap">
+                    <i class="fa-solid fa-arrow-right-arrow-left text-amber-400"></i> Find &amp; Replace:
+                </div>
+                <select id="frField" class="px-2 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-400">
+                    <option value="all">All fields</option>
+                    <option value="article">Article No.</option>
+                    <option value="colour">Colour</option>
+                    <option value="size">Size</option>
+                    <option value="dealer">Dealer Name</option>
+                    <option value="station">Station</option>
+                </select>
+                <input type="text" id="frFind" placeholder="Find (e.g. wrong text)" class="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-400">
+                <i class="fa-solid fa-arrow-right text-slate-500 hidden md:block self-center"></i>
+                <input type="text" id="frReplace" placeholder="Replace with" class="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-1 focus:ring-indigo-400">
+                <label class="flex items-center gap-1.5 text-slate-400 whitespace-nowrap px-1">
+                    <input type="checkbox" id="frExact" class="accent-indigo-500"> Exact match only
+                </label>
+                <button onclick="findReplaceAll()" class="bg-amber-600 hover:bg-amber-500 text-white font-bold px-4 py-1.5 rounded-lg transition active:scale-95 whitespace-nowrap">
+                    <i class="fa-solid fa-check-double"></i> Replace All
+                </button>
+            </div>
+
             <div class="overflow-x-auto max-h-[550px]">
                 <table class="w-full text-left text-xs border-collapse" id="masterTable">
                     <thead class="bg-slate-950 text-slate-300 sticky top-0 z-10 uppercase tracking-wider font-semibold border-b border-slate-700">
@@ -738,6 +762,68 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
                 r.page.toLowerCase().includes(query)
             );
             renderTable(filtered);
+        }
+
+        // Find & Replace across the whole table — for fixing a scan mistake
+        // (like a mis-read colour code or article number) everywhere it
+        // appears in one go, instead of editing each row by hand.
+        function findReplaceAll() {
+            const field = document.getElementById('frField').value;
+            const findVal = document.getElementById('frFind').value;
+            const replaceVal = document.getElementById('frReplace').value;
+            const exactOnly = document.getElementById('frExact').checked;
+
+            if (!findVal) {
+                showToast("Type something in the Find box first.");
+                return;
+            }
+            if (masterRows.length === 0) {
+                showToast("No data to search yet — scan some pages first.");
+                return;
+            }
+
+            const fieldsToCheck = field === 'all'
+                ? ['article', 'colour', 'size', 'dealer', 'station']
+                : [field];
+
+            const findLower = findVal.toLowerCase();
+            let matchCount = 0;
+            let rowsTouched = 0;
+
+            masterRows.forEach(row => {
+                let touched = false;
+                fieldsToCheck.forEach(f => {
+                    const current = String(row[f] ?? "");
+                    if (exactOnly) {
+                        if (current.trim().toLowerCase() === findLower) {
+                            row[f] = replaceVal;
+                            matchCount++;
+                            touched = true;
+                        }
+                    } else {
+                        if (current.toLowerCase().includes(findLower)) {
+                            // Case-insensitive global replace, preserving surrounding text
+                            const re = new RegExp(findVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+                            const before = current;
+                            row[f] = current.replace(re, replaceVal);
+                            if (row[f] !== before) {
+                                matchCount++;
+                                touched = true;
+                            }
+                        }
+                    }
+                });
+                if (touched) rowsTouched++;
+            });
+
+            renderTable(masterRows);
+            filterTable();
+
+            if (matchCount === 0) {
+                showToast(`No matches found for "${findVal}".`);
+            } else {
+                showToast(`Replaced "${findVal}" → "${replaceVal}" in ${rowsTouched} row(s), ${matchCount} field(s) updated.`);
+            }
         }
 
         function downloadExcel() {
