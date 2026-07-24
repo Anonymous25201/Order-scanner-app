@@ -205,11 +205,13 @@
         let uploadedFiles = [];
         let masterRows = [];
 
-        // Corrected sequence: Put standard stable models first
+        // Updated July 2026: Gemini 1.0, 1.5, and 2.0 models are all
+        // retired (404). Current generation is Gemini 3.x. Try the fast
+        // GA model first, then fall back to the lite GA model.
         const MODEL_SEQUENCE = [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-2.0-flash"
+            "gemini-flash-latest",
+            "gemini-3.5-flash",
+            "gemini-3.1-flash-lite"
         ];
 
         window.onload = function() {
