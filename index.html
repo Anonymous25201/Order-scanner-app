@@ -205,12 +205,11 @@
         let uploadedFiles = [];
         let masterRows = [];
 
-        // Updated sequence to prefer stable models
+        // Corrected sequence: Put standard stable models first
         const MODEL_SEQUENCE = [
             "gemini-1.5-flash",
             "gemini-1.5-pro",
-            "gemini-2.0-flash",
-            "gemini-2.5-flash-preview-09-2025"
+            "gemini-2.0-flash"
         ];
 
         window.onload = function() {
@@ -390,14 +389,14 @@
                     const errJson = await response.json().catch(() => ({}));
                     const errMsg = errJson.error?.message || `HTTP ${response.status} ${response.statusText}`;
 
-                    // If model is unsupported/not found, log it and move to next model in sequence immediately
+                    // Skip immediately to the next model if this one is not found or not supported
                     if (response.status === 404 || errMsg.toLowerCase().includes('not found') || errMsg.toLowerCase().includes('not supported')) {
                         console.warn(`Model ${modelName} not available, trying next...`);
                         lastError = new Error(`Model ${modelName} unavailable.`);
-                        continue; // Try next model immediately
+                        continue; 
                     }
 
-                    // For 400/403 (Invalid Key or bad request format), fail immediately without retrying other models
+                    // If it's a key/auth error, throw immediately so user can fix it
                     if (response.status === 403 || response.status === 400) {
                         throw new Error(`API Error (${response.status}): ${errMsg}`);
                     }
@@ -406,18 +405,14 @@
 
                 } catch (err) {
                     lastError = err;
-                    
-                    // If it's an explicit API Error (like bad key), don't bother trying other models.
                     if (err.message.includes('API Error')) {
-                        throw err; 
+                        throw err; // Stop sequence on bad key
                     }
-                    
-                    // Network errors (like CORS or timeout) will drop down here, wait a moment, then try next model as a fallback strategy.
                     console.warn(`Fetch failed for ${modelName}:`, err.message);
                 }
             }
 
-            throw new Error(`All attempts failed. Last error: ${lastError ? lastError.message : 'Unknown network issue'}`);
+            throw new Error(`All models failed. Last error: ${lastError ? lastError.message : 'Unknown network issue'}`);
         }
 
         async function processSinglePage(fileObj, pageIndex) {
