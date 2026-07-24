@@ -121,6 +121,32 @@
             </div>
         </div>
 
+        <!-- Quantity Split Mode -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 space-y-3">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+                <i class="fa-solid fa-shuffle text-amber-400"></i> Quantity Split Mode
+            </h2>
+            <p class="text-xs text-slate-400 max-w-2xl">
+                Some order pads write multiple numbers per line to mean "one per colour/size"
+                (e.g. BK+BR+GRY with 5+5+5 = 5 of each colour). Others use the same layout to
+                mean "one per dispatch month" (e.g. one combo colour ordered 15 in July, 15 in
+                August, 15 in September). These look identical on paper, so pick which this
+                pad uses — the scan can also try to detect month column headers (JUL/AUG/SEP)
+                automatically, but your selection here always takes priority if set.
+            </p>
+            <div class="flex flex-col md:flex-row gap-3 items-start md:items-center">
+                <select id="splitModeSelect" onchange="onSplitModeChange()" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-400">
+                    <option value="auto">Auto-detect from image (default)</option>
+                    <option value="colour">Colour/Size-wise (split by colour or size count)</option>
+                    <option value="month">Month-wise (dispatch schedule — same colour, split by month)</option>
+                </select>
+                <div id="monthLabelsRow" class="hidden flex-1 flex flex-col sm:flex-row gap-2 items-start sm:items-center">
+                    <label class="text-xs text-slate-400 whitespace-nowrap">Month labels, in column order:</label>
+                    <input type="text" id="monthLabelsInput" value="July,August,September" placeholder="e.g. July,August,September" class="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-slate-200 text-xs focus:outline-none focus:ring-1 focus:ring-indigo-400">
+                </div>
+            </div>
+        </div>
+
         <!-- Upload & Settings Section -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
             
@@ -217,6 +243,7 @@
                     <thead class="bg-slate-950 text-slate-300 sticky top-0 z-10 uppercase tracking-wider font-semibold border-b border-slate-700">
                         <tr>
                             <th class="py-3 px-4">Page No.</th>
+                            <th class="py-3 px-4">Month</th>
                             <th class="py-3 px-4">Dealer Name</th>
                             <th class="py-3 px-4">Station</th>
                             <th class="py-3 px-4">Article No.</th>
@@ -228,7 +255,7 @@
                     </thead>
                     <tbody id="tableBody" class="divide-y divide-slate-700/60 text-slate-300 font-medium">
                         <tr id="emptyRow">
-                            <td colspan="8" class="text-center py-12 text-slate-500">
+                            <td colspan="9" class="text-center py-12 text-slate-500">
                                 <i class="fa-solid fa-folder-open text-3xl mb-2 block"></i>
                                 Upload photos above and click "Start Batch AI Extraction" to populate data.
                             </td>
@@ -236,7 +263,7 @@
                     </tbody>
                     <tfoot class="bg-slate-950/90 font-bold text-slate-100 border-t border-slate-700 sticky bottom-0">
                         <tr>
-                            <td colspan="6" class="py-3 px-4 text-right uppercase text-xs tracking-wider">Grand Total Quantity:</td>
+                            <td colspan="7" class="py-3 px-4 text-right uppercase text-xs tracking-wider">Grand Total Quantity:</td>
                             <td class="py-3 px-4 text-right text-sm text-emerald-400 font-black" id="footGrandTotal">0</td>
                             <td></td>
                         </tr>
@@ -263,6 +290,20 @@
         let masterRows = [];
         let mismatchNotes = [];
         let masterIndex = null; // Map: normalizedArticle -> { original, colours: Set, sizes: Set }
+
+        function onSplitModeChange() {
+            const mode = document.getElementById('splitModeSelect').value;
+            document.getElementById('monthLabelsRow').classList.toggle('hidden', mode !== 'month');
+        }
+
+        function getSplitMode() {
+            return document.getElementById('splitModeSelect').value; // 'auto' | 'colour' | 'month'
+        }
+
+        function getMonthLabels() {
+            return document.getElementById('monthLabelsInput').value
+                .split(',').map(s => s.trim()).filter(Boolean);
+        }
 
         // Updated July 2026: Gemini 1.0, 1.5, and 2.0 models are all
         // retired (404 on every call). Current generation is Gemini 3.x.
@@ -527,6 +568,33 @@
             return result.filter(c => c && c !== "/" && c !== "-");
         }
 
+        // Alternate tokenizer: treats "/" as ALWAYS a hard separator, same as
+        // "+" or ",". Some dealers (not all) write individual colours
+        // separated by "/" rather than using it to mean a two-tone combo —
+        // e.g. "BLUE/Red, BK/Rd" meaning three separate colours (Blue, Red,
+        // Black), not two two-tone pairs. There's no way to know which
+        // convention a given line uses just from the punctuation, so this
+        // is used as a fallback that gets picked only when it actually
+        // produces a token count matching the known quantity count.
+        function colourTokensStrict(valRaw) {
+            if (!valRaw) return [];
+            return String(valRaw).split(/[\s+,\/]+/)
+                .map(c => c.replace(/^-+|-+$/g, "").trim())
+                .filter(Boolean);
+        }
+
+        // Picks whichever colour tokenization actually matches the known
+        // number of quantities — the qty count is ground truth (it's just
+        // numbers, nothing ambiguous about it), so let it decide whether
+        // "/" meant "two-tone combo" or "separate colour" for this line.
+        function resolveColourTokens(valRaw, expectedCount) {
+            const glued = colourTokens(valRaw);
+            if (glued.length === expectedCount) return glued;
+            const strict = colourTokensStrict(valRaw);
+            if (strict.length === expectedCount) return strict;
+            return glued; // neither matches — default to the glued interpretation
+        }
+
         // Sizes are sometimes listed together too ("6x9 7x10 8x10") when one
         // row covers several sizes for a single colour.
         function sizeTokens(val) {
@@ -543,27 +611,35 @@
             return withoutTotal.split(/[\s+,]+/).map(s => s.trim()).filter(Boolean);
         }
 
-        // Splits one extracted item into one-or-more final rows. Patterns:
+        // Splits one extracted item into one-or-more final rows. Two modes:
+        //
+        // MONTH-WISE: the numbers mean "same colour/size, one qty per
+        // dispatch month" (July/Aug/Sep...). Colour and size are NOT split
+        // at all — they repeat unchanged on every row, only the qty and a
+        // new "month" label change per row, using the operator-provided (or
+        // image-detected) month label list in order.
+        //
+        // COLOUR/SIZE-WISE (default "auto" also falls back here unless a
+        // page's own detected month headers say otherwise): existing
+        // patterns —
         // (A) multiple colours + matching qty count + sizes ALSO match count
         //     -> zip colour, size, and qty together by position.
         // (A2) multiple colours + matching qty count, size doesn't also
         //     match -> zip colour+qty, size stays as originally written.
         // (B) one colour + multiple sizes + matching qty count -> zip
         //     size+qty, same colour on every row.
-        // (C) only one qty number overall differs from colour/size count ->
-        //     multiple qty numbers but nothing to pair against (single
-        //     colour, single size) -> still split into separate rows with
-        //     the SAME colour/size repeated, never summed into one total.
+        // (C) qty numbers with nothing to pair against (single colour,
+        //     single size) -> still split into separate rows with the SAME
+        //     colour/size repeated, never summed into one total.
         // Anything else with a genuine count mismatch gets flagged instead
         // of guessed at.
-        function splitItem(item, pageLabel, dealer, station) {
-            const colours = colourTokens(item.colour);
+        function splitItem(item, pageLabel, dealer, station, mode, monthLabels, detectedMonthLabels) {
             const sizes = sizeTokens(item.size);
             const qtys = qtyAddends(item.qty);
             const out = [];
             const groupId = crypto.randomUUID(); // shared by every row split from this one original line
 
-            const push = (colour, size, qty) => out.push({
+            const push = (colour, size, qty, month) => out.push({
                 id: crypto.randomUUID(),
                 groupId,
                 page: pageLabel,
@@ -571,8 +647,29 @@
                 article: item.article || "-",
                 colour: colour || item.colour || "-",
                 size: size || item.size || "-",
-                qty: parseInt(qty, 10) || 0
+                qty: parseInt(qty, 10) || 0,
+                month: month || ""
             });
+
+            // Decide effective mode: explicit selection wins; "auto" uses
+            // image-detected month headers if the scan found any, else
+            // falls back to colour/size-wise.
+            const effectiveMode = mode === 'auto'
+                ? (detectedMonthLabels && detectedMonthLabels.length > 0 ? 'month' : 'colour')
+                : mode;
+
+            if (effectiveMode === 'month' && qtys.length > 1) {
+                const labels = (mode === 'auto' && detectedMonthLabels && detectedMonthLabels.length > 0)
+                    ? detectedMonthLabels
+                    : monthLabels;
+                qtys.forEach((q, idx) => {
+                    const monthLabel = labels[idx] || `Month ${idx + 1}`;
+                    push(item.colour, item.size, q, monthLabel);
+                });
+                return out;
+            }
+
+            const colours = resolveColourTokens(item.colour, qtys.length);
 
             if (colours.length > 1 && colours.length === qtys.length && sizes.length === qtys.length) {
                 colours.forEach((c, idx) => push(c, sizes[idx], qtys[idx]));
@@ -581,7 +678,7 @@
             } else if (colours.length === 1 && sizes.length > 1 && sizes.length === qtys.length) {
                 sizes.forEach((s, idx) => push(item.colour, s, qtys[idx]));
             } else if (qtys.length > 1 && colours.length > 1) {
-                mismatchNotes.push(`${item.article || "?"}: ${colours.length} colours vs ${qtys.length} qty numbers — kept combined, please check "${item.colour}" / "${item.qty}"`);
+                mismatchNotes.push(`${item.article || "?"}: ${colours.length} colours vs ${qtys.length} qty numbers — kept combined, please check "${item.colour}" / "${item.qty}". If this pad uses month-wise dispatch quantities instead, switch Quantity Split Mode to "Month-wise".`);
                 push(item.colour, item.size, qtys.reduce((s, q) => s + (parseInt(q, 10) || 0), 0));
             } else if (qtys.length > 1) {
                 // Nothing to pair against (single colour, single size) — still
@@ -1078,11 +1175,12 @@ CRITICAL INSTRUCTIONS:
 1. "pageNo": "Page ${pageIndex + 1}"
 2. "dealerName": extracted dealer name written at the top header of the pad. (If blank/unclear, use "${topDealer || 'VENUS ENTERPRISES'}")
 3. "station": extracted station or town name (or "")
-4. "items": array of item rows written on the sheet. Each item must contain:
+4. "monthLabels": SOME order pads write month names (e.g. "JULY", "AUG", "SEP" or similar) as small column headers directly above the QTY column, meaning the numbers in that row are a dispatch schedule (one quantity per month), NOT one quantity per colour/size. Look carefully near the top of the QTY column for any such handwritten labels. If you find them, return them as an array in the order they appear left-to-right (e.g. ["July","August","September"]). If there are no such month labels visible anywhere, return an empty array [].
+5. "items": array of item rows written on the sheet. Each item must contain:
    - "article": article / model number. Be EXTREMELY careful with numbers. Double check 9s and 3s (e.g. 6999-04, not 6939-04).
-   - "colour": list of colors exactly as written, keep "+" or spaces between multiple colours on one line (e.g., "BK+BR+TAN" or "BK BRN TAN" or "BK/Red")
+   - "colour": list of colors exactly as written, keep "+" or spaces between multiple colours on one line (e.g., "BK+BR+TAN" or "BK BRN TAN" or "BK/Red"). If "monthLabels" is non-empty for this page, still write the colour(s) exactly as shown on that line — do not try to split them yourself.
    - "size": size string exactly as written, keep multiple sizes space-separated if the line lists more than one (e.g. "6x10" or "6x9 7x10 8x10")
-   - "qty": the FULL quantity exactly as written INCLUDING every "+" sign and the "=" total if present (e.g. "5", "5+5+5=15", "3+3"). NEVER collapse this down to just the final total — the individual numbers are needed to split the row by colour or size. This is the single most important field to get exactly right.
+   - "qty": the FULL quantity exactly as written INCLUDING every "+" sign and the "=" total if present (e.g. "5", "5+5+5=15", "3+3"). NEVER collapse this down to just the final total — the individual numbers are needed to split the row by colour, size, or month. This is the single most important field to get exactly right.
 
 DITTO MARKS (",", ",,", "-do-", "-||-", """, "11", "/ /", "Do"): 
 If you see ANY ditto mark or quotation mark signifying "same as above" in ANY column (Article, Colour, or Size), you MUST copy the exact value from the row immediately above it. Do NOT output the ditto mark itself.`;
@@ -1103,6 +1201,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
                             pageNo: { type: "STRING" },
                             dealerName: { type: "STRING" },
                             station: { type: "STRING" },
+                            monthLabels: { type: "ARRAY", items: { type: "STRING" } },
                             items: {
                                 type: "ARRAY",
                                 items: {
@@ -1130,15 +1229,19 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
             const effectiveDealer = parsed.dealerName && parsed.dealerName !== "Unknown Dealer" ? parsed.dealerName : (topDealer || "VENUS ENTERPRISES");
             const pageLabel = parsed.pageNo || `Page ${pageIndex + 1}`;
             const station = parsed.station || "-";
+            const detectedMonthLabels = Array.isArray(parsed.monthLabels) ? parsed.monthLabels.filter(Boolean) : [];
 
             if (pageIndex === 0 && parsed.dealerName && parsed.dealerName !== "Unknown Dealer") {
                 document.getElementById('topDealerInput').value = effectiveDealer;
                 document.getElementById('kpiDealerName').innerText = effectiveDealer;
             }
 
+            const splitMode = getSplitMode();
+            const manualMonthLabels = getMonthLabels();
+
             const extracted = [];
             (parsed.items || []).forEach(item => {
-                extracted.push(...splitItem(item, pageLabel, effectiveDealer, station));
+                extracted.push(...splitItem(item, pageLabel, effectiveDealer, station, splitMode, manualMonthLabels, detectedMonthLabels));
             });
 
             return extracted;
@@ -1214,7 +1317,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
             if (rows.length === 0) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="8" class="text-center py-12 text-slate-500">
+                        <td colspan="9" class="text-center py-12 text-slate-500">
                             <i class="fa-solid fa-folder-open text-3xl mb-2 block"></i>
                             No data extracted yet. Upload pages and click Start Scan.
                         </td>
@@ -1231,6 +1334,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
                 const flagIcon = row.flagged ? `<i class="fa-solid fa-triangle-exclamation text-amber-400 mr-1" title="Flagged — check against master list"></i>` : "";
                 tr.innerHTML = `
                     <td class="py-2.5 px-4 font-semibold text-indigo-400">${flagIcon}${row.page}</td>
+                    <td class="py-2 px-3"><input type="text" value="${row.month || ''}" onchange="updateCell('${row.id}', 'month', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-amber-300 w-full focus:outline-none"></td>
                     <td class="py-2 px-3"><input type="text" value="${row.dealer}" onchange="updateCell('${row.id}', 'dealer', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-slate-100 font-bold w-full focus:outline-none"></td>
                     <td class="py-2 px-3"><input type="text" value="${row.station}" onchange="updateCell('${row.id}', 'station', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-slate-400 w-full focus:outline-none"></td>
                     <td class="py-2 px-3"><input type="text" value="${row.article}" onchange="updateCell('${row.id}', 'article', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-white font-bold w-full focus:outline-none"></td>
@@ -1344,6 +1448,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
 
             const excelData = masterRows.map(r => ({
                 "PAGE NO.": r.page,
+                "MONTH": r.month || "",
                 "DEALER NAME": r.dealer,
                 "STATION": r.station,
                 "ARTICLE NO.": r.article,
@@ -1355,6 +1460,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
             const total = masterRows.reduce((acc, r) => acc + (parseInt(r.qty, 10) || 0), 0);
             excelData.push({
                 "PAGE NO.": "",
+                "MONTH": "",
                 "DEALER NAME": "",
                 "STATION": "",
                 "ARTICLE NO.": "",
@@ -1366,6 +1472,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
             const worksheet = XLSX.utils.json_to_sheet(excelData);
             worksheet['!cols'] = [
                 { wch: 12 },
+                { wch: 10 },
                 { wch: 25 },
                 { wch: 18 },
                 { wch: 18 },
