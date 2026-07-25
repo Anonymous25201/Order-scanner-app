@@ -561,7 +561,11 @@
                     }
                 }
             });
-            return result.filter(c => c && c !== "/" && c !== "-");
+            // Defensive cleanup: a stray quantity digit can sometimes leak
+            // into the colour text on messy handwritten lines (numbers and
+            // colour notes written close together/overlapping). A token
+            // that's ENTIRELY digits is never a real colour name, so drop it.
+            return result.filter(c => c && c !== "/" && c !== "-" && !/^\d+$/.test(c));
         }
 
         // Alternate tokenizer: treats "/" as ALWAYS a hard separator, same as
@@ -610,7 +614,15 @@
             // Strip a trailing "-N" dealer total (e.g. "2+2+2 -6") — a dash
             // followed by digits at the very end, separate from the "+" chain.
             withoutTotal = withoutTotal.replace(/\s*-\s*\d+\s*$/, "");
-            return withoutTotal.split(/[\s+,]+/).map(s => s.trim()).filter(Boolean);
+            const rawTokens = withoutTotal.split(/[\s+,]+/).map(s => s.trim()).filter(Boolean);
+            // Defensive cleanup: a colour abbreviation or tick-mark letter can
+            // sometimes leak into the qty string on messy handwritten lines.
+            // Strip any non-digit characters from each token; if nothing
+            // numeric is left, drop that token entirely rather than treating
+            // stray letters as part of a quantity.
+            return rawTokens
+                .map(t => t.replace(/[^\d]/g, ""))
+                .filter(t => t.length > 0);
         }
 
         // Splits one extracted item into one-or-more final rows. Two modes:
@@ -1203,6 +1215,8 @@ CRITICAL INSTRUCTIONS:
    - "colour": list of colors exactly as written, keep "+" or spaces between multiple colours on one line (e.g., "BK+BR+TAN" or "BK BRN TAN" or "BK/Red"). Some dealers write a generic label like "Mix" or "All" in this column and then write the ACTUAL colour breakdown as small handwritten notes directly above the quantity numbers (often in a different ink colour) — if you see this pattern, use those colour notes above the QTY column instead of the generic "Mix"/"All" label. If "monthLabels" is non-empty for this page, still write the colour(s) exactly as shown on that line — do not try to split them yourself.
    - "size": size string exactly as written, keep multiple sizes space-separated if the line lists more than one (e.g. "6x10" or "6x9 7x10 8x10")
    - "qty": the FULL quantity exactly as written INCLUDING every "+" sign and the "=" total if present (e.g. "5", "5+5+5=15", "3+3"). NEVER collapse this down to just the final total — the individual numbers are needed to split the row by colour, size, or month. This is the single most important field to get exactly right.
+
+STRICT FIELD SEPARATION — "colour" and "qty" must never mix content: the "colour" field must contain ONLY colour codes/names — no digits, no "+" signs. The "qty" field must contain ONLY numbers, "+" signs, and "=" — no letters. On messy handwritten lines (colour notes squeezed in above the quantity numbers, corrections, cross-outs, different pen colours overlapping), it can be tempting to accidentally pull a stray digit into the colour field or a stray letter into the qty field — do not do this. Read the colour labels and the quantity digits as two completely separate pieces of information, even when they are physically close together or overlapping on the page, and place each into its correct field only.
 
 TICK MARKS / CHECKMARKS (✓) ARE NOT DIGITS: Some dealers mark a quantity number with a small tick or checkmark (often in red ink) to show it's been verified/counted. This tick is NOT part of the number and must NEVER be read as a "1", "2", part of the number's shape, or an extra addend — it is purely a verification mark and should be ignored completely when reading the quantity.
 
