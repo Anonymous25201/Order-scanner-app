@@ -266,7 +266,6 @@
                     </tfoot>
                 </table>
             </div>
-            <div id="mismatchPanel" class="hidden border-t border-amber-700/40 bg-amber-950/30 text-amber-300 text-xs p-3"></div>
         </div>
 
     </div>
@@ -284,7 +283,6 @@
         let userApiKey = "";
         let uploadedFiles = [];
         let masterRows = [];
-        let mismatchNotes = [];
         let masterIndex = null; // Map: normalizedArticle -> { original, colours: Set, sizes: Set }
 
         function onSplitModeChange() {
@@ -351,6 +349,20 @@
             chevron.classList.toggle('rotate-180');
         }
 
+        function toggleRowFlag(event, rowId) {
+            event.stopPropagation();
+            const box = document.getElementById(`flagbox-${rowId}`);
+            if (!box) return;
+            const isHidden = box.classList.contains('hidden');
+            // Close any other open flag boxes first
+            document.querySelectorAll('[id^="flagbox-"]').forEach(el => el.classList.add('hidden'));
+            if (isHidden) box.classList.remove('hidden');
+        }
+        // Close an open flag dropdown when clicking anywhere else on the page
+        document.addEventListener('click', () => {
+            document.querySelectorAll('[id^="flagbox-"]').forEach(el => el.classList.add('hidden'));
+        });
+
         function showToast(msg) {
             const toast = document.getElementById('toast');
             document.getElementById('toastMsg').innerText = msg;
@@ -406,10 +418,8 @@
         function clearAll() {
             uploadedFiles = [];
             masterRows = [];
-            mismatchNotes = [];
             renderThumbnails();
             renderTable(masterRows);
-            renderMismatchPanel();
             updateStats();
             document.getElementById('btnStartScan').disabled = true;
             document.getElementById('imageInput').value = '';
@@ -427,18 +437,6 @@
             document.getElementById('statTotalQty').innerText = `${total.toLocaleString()} Pairs`;
             document.getElementById('footGrandTotal').innerText = total.toLocaleString();
             document.getElementById('visibleBadge').innerText = `${masterRows.length} rows`;
-        }
-
-        function renderMismatchPanel() {
-            const panel = document.getElementById('mismatchPanel');
-            if (mismatchNotes.length === 0) {
-                panel.classList.add('hidden');
-                panel.innerHTML = '';
-                return;
-            }
-            panel.classList.remove('hidden');
-            panel.innerHTML = `<b>${mismatchNotes.length} row(s) couldn't be split automatically — check against the photo:</b><br>` +
-                mismatchNotes.map(n => `&bull; ${n}`).join('<br>');
         }
 
         // AGGRESSIVE COMPRESSION: Resizes images heavily to ensure payload is tiny and won't trigger network timeouts.
@@ -643,7 +641,7 @@
             const out = [];
             const groupId = crypto.randomUUID(); // shared by every row split from this one original line
 
-            const push = (colour, size, qty, month) => out.push({
+            const push = (colour, size, qty, month, note) => out.push({
                 id: crypto.randomUUID(),
                 groupId,
                 page: pageLabel,
@@ -652,7 +650,9 @@
                 colour: colour || item.colour || "-",
                 size: size || item.size || "-",
                 qty: parseInt(qty, 10) || 0,
-                month: month || ""
+                month: month || "",
+                splitFlagReasons: note ? [note] : [],
+                masterFlagReasons: []
             });
 
             // Decide effective mode: explicit selection wins; "auto" uses
@@ -682,8 +682,8 @@
             } else if (colours.length === 1 && sizes.length > 1 && sizes.length === qtys.length) {
                 sizes.forEach((s, idx) => push(item.colour, s, qtys[idx]));
             } else if (qtys.length > 1 && colours.length > 1) {
-                mismatchNotes.push(`${item.article || "?"}: ${colours.length} colours vs ${qtys.length} qty numbers — kept combined, please check "${item.colour}" / "${item.qty}". If this pad uses month-wise dispatch quantities instead, switch Quantity Split Mode to "Month-wise".`);
-                push(item.colour, item.size, qtys.reduce((s, q) => s + (parseInt(q, 10) || 0), 0));
+                const note = `${colours.length} colours vs ${qtys.length} qty numbers — kept combined, please check "${item.colour}" / "${item.qty}". If this pad uses month-wise dispatch quantities instead, switch Quantity Split Mode to "Month-wise".`;
+                push(item.colour, item.size, qtys.reduce((s, q) => s + (parseInt(q, 10) || 0), 0), null, note);
             } else if (qtys.length > 1) {
                 // Nothing to pair against (single colour, single size) — still
                 // split into separate rows, e.g. "3+2=5" -> two rows of 3 and 2.
@@ -983,6 +983,21 @@
             });
         }
 
+        // Flags a quantity of 0 (or unparseable) as a likely scan error —
+        // nobody orders zero units, so this almost always means the
+        // handwriting/number wasn't read correctly. Runs independently of
+        // whether a master article list is loaded, since it's not a catalog
+        // check — it's just basic sanity on the number itself.
+        function checkQtyValidity(rows) {
+            rows.forEach(r => {
+                r.qtyFlagReasons = [];
+                const qtyNum = parseInt(r.qty, 10);
+                if (!qtyNum || qtyNum <= 0) {
+                    r.qtyFlagReasons.push(`Quantity is "${r.qty}" — likely misread from the photo (0 or blank is almost never a real order), please check.`);
+                }
+            });
+        }
+
         // Checks a single colour/size value against the set of values known
         // to be valid for a matched article. Tries, in order: exact match,
         // abbreviation-expanded match (BK -> Black), per-part combo match
@@ -1068,12 +1083,13 @@
                 const gid = r.groupId || r.id;
                 if (!groups.has(gid)) groups.set(gid, []);
                 groups.get(gid).push(r);
-                r.flagged = false; // reset each time correction runs
+                r.splitFlagReasons = r.splitFlagReasons || [];
+                r.masterFlagReasons = []; // re-derived fresh every time this runs
+                r.masterChecked = true;
             });
 
             const flag = (r, note) => {
-                r.flagged = true;
-                mismatchNotes.push(note);
+                r.masterFlagReasons.push(note);
             };
 
             groups.forEach(groupRows => {
@@ -1157,11 +1173,10 @@
                 showToast("No scanned rows to check yet.");
                 return;
             }
-            mismatchNotes = [];
             globalExpandColours(masterRows);
+            checkQtyValidity(masterRows);
             applyMasterCorrectionToRows(masterRows);
             renderTable(masterRows);
-            renderMismatchPanel();
             showToast(`Re-checked ${masterRows.length} rows against the master list.`);
         }
 
@@ -1182,11 +1197,16 @@ CRITICAL INSTRUCTIONS:
 2. "dealerName": extracted dealer name written at the top header of the pad. (If blank/unclear, use "${topDealer || 'VENUS ENTERPRISES'}")
 3. "station": extracted station or town name (or "")
 4. "monthLabels": SOME order pads write month names (e.g. "JULY", "AUG", "SEP" or similar) as small column headers directly above the QTY column, meaning the numbers in that row are a dispatch schedule (one quantity per month), NOT one quantity per colour/size. Look carefully near the top of the QTY column for any such handwritten labels. If you find them, return them as an array in the order they appear left-to-right (e.g. ["July","August","September"]). If there are no such month labels visible anywhere, return an empty array [].
-5. "items": array of item rows written on the sheet. Each item must contain:
+5. COLUMN ORDER VARIES between pads — some list Colours before Size, others list Size before Colours. Always read the actual printed column headers on THIS page to know which is which; never assume a fixed order from memory.
+6. "items": array of item rows written on the sheet. Each item must contain:
    - "article": article / model number. Be EXTREMELY careful with numbers. Double check 9s and 3s (e.g. 6999-04, not 6939-04).
-   - "colour": list of colors exactly as written, keep "+" or spaces between multiple colours on one line (e.g., "BK+BR+TAN" or "BK BRN TAN" or "BK/Red"). If "monthLabels" is non-empty for this page, still write the colour(s) exactly as shown on that line — do not try to split them yourself.
+   - "colour": list of colors exactly as written, keep "+" or spaces between multiple colours on one line (e.g., "BK+BR+TAN" or "BK BRN TAN" or "BK/Red"). Some dealers write a generic label like "Mix" or "All" in this column and then write the ACTUAL colour breakdown as small handwritten notes directly above the quantity numbers (often in a different ink colour) — if you see this pattern, use those colour notes above the QTY column instead of the generic "Mix"/"All" label. If "monthLabels" is non-empty for this page, still write the colour(s) exactly as shown on that line — do not try to split them yourself.
    - "size": size string exactly as written, keep multiple sizes space-separated if the line lists more than one (e.g. "6x10" or "6x9 7x10 8x10")
    - "qty": the FULL quantity exactly as written INCLUDING every "+" sign and the "=" total if present (e.g. "5", "5+5+5=15", "3+3"). NEVER collapse this down to just the final total — the individual numbers are needed to split the row by colour, size, or month. This is the single most important field to get exactly right.
+
+TICK MARKS / CHECKMARKS (✓) ARE NOT DIGITS: Some dealers mark a quantity number with a small tick or checkmark (often in red ink) to show it's been verified/counted. This tick is NOT part of the number and must NEVER be read as a "1", "2", part of the number's shape, or an extra addend — it is purely a verification mark and should be ignored completely when reading the quantity.
+
+CROSS-OUTS / CORRECTIONS: If a number is struck through and a different number is written next to or above it, use ONLY the corrected (final) number — the struck-through one was replaced and should not appear in your output at all.
 
 DITTO MARKS (",", ",,", "-do-", "-||-", """, "11", "/ /", "Do"): 
 If you see ANY ditto mark or quotation mark signifying "same as above" in ANY column (Article, Colour, or Size), you MUST copy the exact value from the row immediately above it. Do NOT output the ditto mark itself.`;
@@ -1274,9 +1294,7 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
             progress.innerHTML = `<span class='text-amber-400'>Initializing scan sequence...</span>`;
 
             masterRows = [];
-            mismatchNotes = [];
             renderTable([]);
-            renderMismatchPanel();
 
             let successPages = 0;
 
@@ -1285,12 +1303,12 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
                 try {
                     const rows = await processSinglePage(uploadedFiles[i], i);
                     globalExpandColours(rows); // always spell out short forms, even with no catalog loaded
+                    checkQtyValidity(rows); // always flag 0/blank quantities as likely scan errors
                     if (masterIndex && masterIndex.size > 0) {
                         applyMasterCorrectionToRows(rows); // catalog match refines/validates on top
                     }
                     masterRows.push(...rows);
                     renderTable(masterRows);
-                    renderMismatchPanel();
                     updateStats();
                     successPages++;
                     progress.innerHTML = `<span class='text-emerald-400'>Page ${i + 1} completed successfully.</span>`;
@@ -1333,13 +1351,28 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
             }
 
             rows.forEach((row) => {
+                const reasons = [...(row.splitFlagReasons || []), ...(row.masterFlagReasons || []), ...(row.qtyFlagReasons || [])];
+                const isFlagged = reasons.length > 0;
+                const isClean = !isFlagged && row.masterChecked;
                 const tr = document.createElement('tr');
-                tr.className = row.flagged
+                tr.className = isFlagged
                     ? "hover:bg-amber-900/30 transition bg-amber-950/40 border-l-2 border-amber-500"
                     : "hover:bg-slate-700/40 transition";
-                const flagIcon = row.flagged ? `<i class="fa-solid fa-triangle-exclamation text-amber-400 mr-1" title="Flagged — check against master list"></i>` : "";
+                const escapedReasons = reasons.map(r => r.replace(/'/g, "&#39;").replace(/"/g, "&quot;"));
+                const flagIcon = isFlagged
+                    ? `<button type="button" onclick="toggleRowFlag(event, '${row.id}')" class="relative inline-block mr-1 align-middle">
+                         <i class="fa-solid fa-triangle-exclamation text-amber-400"></i>
+                       </button>`
+                    : (isClean
+                        ? `<i class="fa-solid fa-circle-check text-emerald-400 mr-1 align-middle" title="Checked against article list — colour and size confirmed valid"></i>`
+                        : "");
+                const flagDropdown = isFlagged
+                    ? `<div id="flagbox-${row.id}" class="hidden absolute z-30 bg-slate-950 border border-amber-500 text-amber-100 text-[11px] rounded-lg p-3 mt-1 w-72 shadow-2xl leading-snug">
+                         ${escapedReasons.map(r => `<div class="mb-1.5 last:mb-0">&bull; ${r}</div>`).join('')}
+                       </div>`
+                    : "";
                 tr.innerHTML = `
-                    <td class="py-2.5 px-4 font-semibold text-indigo-400">${flagIcon}${row.page}</td>
+                    <td class="py-2.5 px-4 font-semibold text-indigo-400 relative">${flagIcon}${flagDropdown}${row.page}</td>
                     <td class="py-2 px-3"><input type="text" value="${row.month || ''}" onchange="updateCell('${row.id}', 'month', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-amber-300 w-full focus:outline-none"></td>
                     <td class="py-2 px-3"><input type="text" value="${row.station}" onchange="updateCell('${row.id}', 'station', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-slate-400 w-full focus:outline-none"></td>
                     <td class="py-2 px-3"><input type="text" value="${row.article}" onchange="updateCell('${row.id}', 'article', this.value)" class="bg-transparent hover:bg-slate-900 focus:bg-slate-900 border border-transparent focus:border-indigo-500 rounded px-1.5 py-0.5 text-white font-bold w-full focus:outline-none"></td>
@@ -1360,10 +1393,57 @@ If you see ANY ditto mark or quotation mark signifying "same as above" in ANY co
 
         function updateCell(id, field, value) {
             const item = masterRows.find(r => r.id === id);
-            if (item) {
+            if (!item) return;
+
+            if (field === 'article') {
+                const oldKey = normalizeCode(item.article);
+                item.article = value;
+                // If this correction matches an entry in the master list,
+                // use ITS exact spelling/casing as the canonical form —
+                // otherwise use whatever was just typed.
+                const matched = masterIndex && masterIndex.size > 0 ? matchArticleAgainstMaster(value) : null;
+                const canonical = matched ? matched.original : value;
+                item.article = canonical;
+
+                // Propagate to every other row that's the SAME underlying
+                // article (even if it was scanned with different casing or
+                // punctuation) — fixing one instance fixes all of them.
+                let propagatedCount = 0;
+                if (oldKey) {
+                    masterRows.forEach(r => {
+                        if (r.id !== id && normalizeCode(r.article) === oldKey) {
+                            r.article = canonical;
+                            propagatedCount++;
+                        }
+                    });
+                }
+                if (propagatedCount > 0) {
+                    showToast(`Also updated ${propagatedCount} other row(s) with the same article.`);
+                }
+            } else {
                 item[field] = value;
-                updateStats();
             }
+
+            if (field === 'qty') {
+                checkQtyValidity([item]);
+                renderTable(masterRows);
+            } else if (field === 'article') {
+                if (masterIndex && masterIndex.size > 0) {
+                    const key = normalizeCode(item.article);
+                    const affectedRows = masterRows.filter(r => normalizeCode(r.article) === key);
+                    applyMasterCorrectionToRows(affectedRows);
+                }
+                renderTable(masterRows);
+            } else if (['colour', 'size'].includes(field) && masterIndex && masterIndex.size > 0) {
+                // Re-check just this row's group live, so fixing it by hand
+                // clears the highlight immediately instead of waiting for a
+                // full "Re-check All Rows" pass.
+                const gid = item.groupId || item.id;
+                const groupRows = masterRows.filter(r => (r.groupId || r.id) === gid);
+                applyMasterCorrectionToRows(groupRows);
+                renderTable(masterRows);
+            }
+            updateStats();
         }
 
         function deleteRow(id) {
